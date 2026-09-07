@@ -55,6 +55,7 @@ def database(url, auto_import):
     engine = db.connect(url)
     if auto_import:
         import_history(engine)
+    db.ensure_invoice_numbers(engine)
     return engine
 
 try:
@@ -79,7 +80,7 @@ with st.sidebar:
     month = st.selectbox('Month', list(range(1, 13)), index=default_period.month-1,
                          format_func=lambda n: calendar.month_name[n])
     st.caption('Dates use Malaysia time (UTC+8).')
-    if password and st.button('Sign out'):
+    if password and st.button('Sign out', key='sign_out'):
         st.session_state.clear()
         st.rerun()
 
@@ -113,7 +114,7 @@ def sales_frame(rows):
         for r in rows], columns=['Date','Sales 1','Sales 2','E-Wallet','Total daily sales'])
 
 def expenses_frame(rows):
-    return pd.DataFrame([{'ID': r['id'], 'Invoice date': r['invoice_date'],
+    return pd.DataFrame([{'ID': r.get('display_id',r['id']), 'Invoice date': r['invoice_date'],
         'Reporting month': str(r['reporting_month'])[:7], 'Invoice code': r['invoice_code'],
         'Description': r['description'], 'Category': r['category'] or 'Uncategorised', 'Amount': r['amount_sen']/100 if r['amount_sen'] is not None else None}
         for r in rows], columns=['ID','Invoice date','Reporting month','Invoice code','Description','Category','Amount'])
@@ -197,12 +198,12 @@ elif page == 'Expenses':
         else:
             by_id = {r['id']: r for r in visible_rows}
             selected = st.selectbox('Choose invoice', list(by_id), format_func=lambda key:
-                f"{by_id[key]['invoice_date']} · {by_id[key]['invoice_code']} · {db.rm(by_id[key]['amount_sen']) if by_id[key]['amount_sen'] is not None else 'Amount missing'} · {key[:8]}")
+                f"{by_id[key].get('display_id',key)} · {by_id[key]['invoice_date']} · {by_id[key]['invoice_code']} · {db.rm(by_id[key]['amount_sen']) if by_id[key]['amount_sen'] is not None else 'Amount missing'}")
             snapshot_key = f'snapshot_expense_{selected}'
             if snapshot_key not in st.session_state:
                 st.session_state[snapshot_key] = by_id[selected]
             record = st.session_state[snapshot_key]
-            st.caption('ID: ' + record['id'])
+            st.caption('ID: ' + record.get('display_id',record['id']))
             if record.get('source_sheet'):
                 with st.expander('Original workbook record'):
                     st.write(f"{record['source_sheet']} · row {record['source_row']} · code {record['legacy_code']}")
@@ -222,7 +223,14 @@ elif page == 'Expenses':
                 help='Letters, numbers, slashes and hyphens are accepted. For an expense without an invoice, enter a meaningful internal reference.')
             category = right.selectbox('Category', db.CATEGORIES,
                 index=db.CATEGORIES.index(record['category']) if record and record['category'] in db.CATEGORIES else None, placeholder='Choose category')
-            desc = st.text_input('Description', value=record['description'] if record else '', max_chars=2000)
+            descriptions=db.description_options(engine)
+            current=record['description'] if record else None
+            if current and current not in descriptions: descriptions.insert(0,current)
+            desc = st.selectbox('Description',descriptions,
+                index=descriptions.index(current) if current else None,
+                accept_new_options=True,filter_mode='contains',
+                placeholder='Type a keyword or add a new description',
+                help='Search previous descriptions from all months. Select a match, or type a new description and press Enter. New descriptions become suggestions after the invoice is saved.')
             amount = st.number_input('Amount (RM)', min_value=0.0, max_value=float(db.MAX_RM),
                 value=max(0,(record['amount_sen'] or 0)/100) if record else 0.0, step=0.01, format='%.2f')
             submit = st.form_submit_button('Save changes' if record else 'Save invoice', type='primary')
@@ -240,7 +248,7 @@ elif page == 'Expenses':
                     st.error('The save could not be confirmed. Refresh records before retrying.')
                 else:
                     del st.session_state['expense_token']
-                    saved(f'Invoice saved for {report_date:%B %Y}. ID: {new_id}')
+                    saved(f'Invoice saved for {report_date:%B %Y}. ID: {db.invoice_label(engine,new_id)}')
         if record:
             with st.expander('Void this invoice'):
                 st.caption('The record stays in the database but is excluded from totals. This action cannot be undone in the app.')
@@ -252,7 +260,7 @@ elif page == 'Expenses':
         st.caption('Filter by supplier or description above, then select invoices to categorise together. Amounts and dates stay as recorded.')
         select_all=st.checkbox(f'Select all {len(by_id)} shown invoices',value=False)
         chosen=list(by_id) if select_all else st.multiselect('Invoices to categorise',list(by_id),format_func=lambda key:
-            f"{by_id[key].get('legacy_code') or by_id[key]['invoice_code']} · {by_id[key]['description']} · {key[:8]}")
+            f"{by_id[key].get('display_id',key)} · {by_id[key].get('legacy_code') or by_id[key]['invoice_code']} · {by_id[key]['description']}")
         bulk_category=st.selectbox('Assign to',db.CATEGORIES,index=None,placeholder='Choose category')
         if st.button('Apply category',disabled=not chosen or not bulk_category):
             run_write(lambda: db.assign_categories(engine,[by_id[key] for key in chosen],bulk_category),f'Updated {len(chosen)} invoices.')

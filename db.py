@@ -49,6 +49,10 @@ workbook_summaries = Table('workbook_summaries', metadata,
 import_batches = Table('import_batches', metadata,
     Column('id', String(64), primary_key=True), Column('report_json', Text, nullable=False),
     Column('imported_at', String(40), nullable=False))
+invoice_numbers = Table('invoice_numbers', metadata,
+    Column('number', Integer, primary_key=True, autoincrement=True),
+    Column('invoice_id', String(36), nullable=False, unique=True),
+    sqlite_autoincrement=True)
 
 class Conflict(ValueError):
     """A record was already saved or changed in another session."""
@@ -91,9 +95,43 @@ def connect(url):
         with engine.begin() as conn:
             conn.execute(text('ALTER TABLE daily_sales ENABLE ROW LEVEL SECURITY'))
             conn.execute(text('ALTER TABLE expenses ENABLE ROW LEVEL SECURITY'))
-            for table in ('historical_expenses','workbook_summaries','import_batches'):
+            for table in ('historical_expenses','workbook_summaries','import_batches','invoice_numbers'):
                 conn.execute(text(f'ALTER TABLE {table} ENABLE ROW LEVEL SECURITY'))
     return engine
+
+def allocate_numbers(conn, ids):
+    if not ids: return
+    if conn.dialect.name=='postgresql':
+        from sqlalchemy.dialects.postgresql import insert as dialect_insert
+    else:
+        from sqlalchemy.dialects.sqlite import insert as dialect_insert
+    statement=dialect_insert(invoice_numbers).on_conflict_do_nothing(index_elements=['invoice_id'])
+    for start in range(0,len(ids),500):
+        conn.execute(statement,[{'invoice_id':key} for key in ids[start:start+500]])
+
+def ensure_invoice_numbers(engine):
+    with engine.begin() as conn:
+        known=set(conn.execute(select(invoice_numbers.c.invoice_id)).scalars())
+        ids=set()
+        for table in (expenses,historical_expenses):
+            ids.update(conn.execute(select(table.c.id)).scalars())
+        allocate_numbers(conn,sorted(ids-known))
+
+def invoice_label(engine,record_id):
+    with engine.connect() as conn:
+        number=conn.execute(select(invoice_numbers.c.number).where(invoice_numbers.c.invoice_id==record_id)).scalar_one()
+    return f'INV-{number:05d}'
+
+def description_options(engine):
+    with engine.connect() as conn:
+        values=[]
+        for table in (expenses,historical_expenses):
+            values.extend(conn.execute(select(table.c.description).distinct()).scalars())
+    options={}
+    for value in sorted(values):
+        value=value.strip()
+        if value: options.setdefault(value.casefold(),value)
+    return sorted(options.values(),key=str.casefold)
 
 def get_sale(engine, day):
     with engine.connect() as conn:
@@ -119,7 +157,7 @@ def save_sale(engine, day, amounts, expected_version=None):
         raise Conflict('Sales already exist for this date. Refresh and use Edit saved day.') from None
 
 def expense_values(invoice_date, reporting_month, invoice_code, description, category, amount):
-    code, desc = str(invoice_code).strip(), str(description).strip()
+    code, desc = str(invoice_code or '').strip(), str(description or '').strip()
     if not isinstance(invoice_date, date) or not isinstance(reporting_month, date):
         raise ValueError('Choose valid dates.')
     if not code or len(code) > 120:
@@ -141,6 +179,7 @@ def add_expense(engine, invoice_date, reporting_month, invoice_code, description
     try:
         with engine.begin() as conn:
             conn.execute(insert(expenses).values(id=record_id, version=1, voided=False, **values))
+            allocate_numbers(conn,[record_id])
     except IntegrityError:
         raise Conflict('This submission has already been saved. Refresh to start another expense.') from None
     return record_id
@@ -191,7 +230,8 @@ def monthly_records(engine, year, month):
                 expenses.c.voided.is_(False)).order_by(expenses.c.invoice_date, expenses.c.id)).mappings().all()
             e += conn.execute(select(historical_expenses).where(historical_expenses.c.reporting_month==start,
                 historical_expenses.c.voided.is_(False))).mappings().all()
-    return [dict(row) for row in s], [dict(row) for row in e]
+            numbers=dict(conn.execute(select(invoice_numbers.c.invoice_id,invoice_numbers.c.number)).all())
+    return [dict(row) for row in s], [dict(row,display_id=f'INV-{numbers[row["id"]]:05d}' if row['id'] in numbers else row['id']) for row in e]
 
 def summarize(sale_rows, expense_rows):
     debit = {label: sum(r[key] for r in sale_rows) for label, key in
@@ -209,7 +249,7 @@ def summarize(sale_rows, expense_rows):
 def all_records(engine):
     with engine.connect() as conn:
         return {t.name: [dict(row) for row in conn.execute(select(t)).mappings()]
-                for t in (sales, expenses,historical_expenses,workbook_summaries,import_batches)}
+                for t in (sales, expenses,historical_expenses,workbook_summaries,import_batches,invoice_numbers)}
 
 def available_periods(engine):
     with engine.connect() as conn:

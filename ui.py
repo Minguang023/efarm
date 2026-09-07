@@ -17,6 +17,9 @@ def style():
     [data-testid="stSidebar"] h1,[data-testid="stSidebar"] p,[data-testid="stSidebar"] label,
     [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {color:#f3f1df!important}
     [data-testid="stSidebar"] [data-testid="stRadio"] label {padding:.38rem .1rem}
+    [data-testid="stSidebar"] .st-key-sign_out button,
+    [data-testid="stSidebar"] .st-key-sign_out button p,
+    [data-testid="stSidebar"] .st-key-sign_out [data-testid="stMarkdownContainer"] {color:#000!important}
     [data-testid="stMetric"] {background:#fffdf7;border:1px solid #dedfd2;border-radius:16px;padding:1.1rem 1.2rem;min-height:130px}
     [data-testid="stMetricValue"] {color:#1d5945;font-size:clamp(1.45rem,2.3vw,2.25rem)}
     [data-testid="stMetricLabel"] {color:#657165}
